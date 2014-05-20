@@ -3,6 +3,7 @@ package com.github.emalock3.spring;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.jms.ConnectionFactory;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.pool.PooledConnectionFactory;
@@ -17,12 +18,11 @@ import org.springframework.integration.annotation.ServiceActivator;
 import org.springframework.integration.channel.DirectChannel;
 import org.springframework.integration.config.EnableIntegration;
 import org.springframework.integration.core.MessageSource;
-import org.springframework.integration.handler.LoggingHandler;
-import org.springframework.integration.jms.JmsDestinationPollingSource;
 import org.springframework.integration.jms.JmsOutboundGateway;
+import org.springframework.integration.jms.config.JmsChannelFactoryBean;
 import org.springframework.integration.scheduling.PollerMetadata;
-import org.springframework.jms.core.JmsTemplate;
 import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHandler;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.scheduling.support.PeriodicTrigger;
 
@@ -32,8 +32,10 @@ import org.springframework.scheduling.support.PeriodicTrigger;
 @EnableAutoConfiguration
 public class Application {
     
+    private static final String QUEUE_NAME = "test.queue";
+    
     @Bean(destroyMethod = "stop")
-    public PooledConnectionFactory jmsFactory() {
+    public PooledConnectionFactory jmsConnFactory() {
         return new PooledConnectionFactory(
                 new ActiveMQConnectionFactory("vm://localhost?broker.persistent=false"));
     }
@@ -62,31 +64,34 @@ public class Application {
     
     @Bean
     @ServiceActivator(inputChannel = "requestPushChannel")
-    public JmsOutboundGateway pushQueueGateway(ConnectionFactory connFactory) {
+    public JmsOutboundGateway pushQueueGateway(ConnectionFactory jmsConnFactory) {
         JmsOutboundGateway gateway = new JmsOutboundGateway();
-        gateway.setConnectionFactory(connFactory);
-        gateway.setRequestDestinationName("test.queue");
+        gateway.setConnectionFactory(jmsConnFactory);
+        gateway.setRequestDestinationName(QUEUE_NAME);
         return gateway;
     }
     
-    @Bean
-    public MessageChannel requestPopChannel() {
-        return new DirectChannel();
+    @Bean(destroyMethod = "destroy")
+    public JmsChannelFactoryBean jmsInboundChannel(ConnectionFactory jmsConnFactory) {
+        JmsChannelFactoryBean factory = new JmsChannelFactoryBean(true);
+        factory.setConnectionFactory(jmsConnFactory);
+        factory.setSessionTransacted(true);
+        factory.setDestinationName(QUEUE_NAME);
+        return factory;
     }
     
-    @Bean
-    @InboundChannelAdapter(value = "requestPopChannel", 
-            poller = @Poller(fixedDelay = "1000", maxMessagesPerPoll = "10"))
-    public JmsDestinationPollingSource jmsQueueSource(JmsTemplate jmsTemplate) {
-        JmsDestinationPollingSource source = new JmsDestinationPollingSource(jmsTemplate);
-        source.setDestinationName("test.queue");
-        return source;
-    }
+    private final AtomicInteger counter = new AtomicInteger();
     
     @Bean
-    @ServiceActivator(inputChannel = "requestPopChannel")
-    public LoggingHandler loggingHandler() {
-        return new LoggingHandler("info");
+    @ServiceActivator(inputChannel = "jmsInboundChannel")
+    public MessageHandler loggingHandler() {
+        return message -> {
+            String now = LocalDateTime.now().format(DateTimeFormatter.ISO_DATE_TIME);
+            if (counter.incrementAndGet() % 3 == 0) {
+                throw new RuntimeException("TEST!: " + message.getPayload());
+            }
+            System.out.println(now + ": " + message.getPayload());
+        };
     }
     
     public static void main(String ... args) {
